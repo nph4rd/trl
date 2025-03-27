@@ -1053,8 +1053,6 @@ class GRPOTrainer(Trainer):
                         "completion": completions_to_log,
                         "reward": rewards.tolist(),
                     }
-                    if images is not None:
-                        table["image"] = [wandb.Image(img) for img in gather_object(images)]
 
                     df = pd.DataFrame(table)
                     wandb.log({"completions": wandb.Table(dataframe=df)})

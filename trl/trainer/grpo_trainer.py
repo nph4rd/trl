@@ -806,7 +806,7 @@ class GRPOTrainer(Trainer):
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
         prompts = [x["prompt"] for x in inputs]
-        images = [x["image"] for x in inputs if "image" in x]
+        images = [x["images"] for x in inputs if "images" in x]
         if len(images) == 0:
             images = None
         # either we have no images, or we have images and prompts

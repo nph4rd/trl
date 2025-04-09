@@ -679,15 +679,23 @@ class GRPOTrainer(Trainer):
     @profiling_decorator
     def _get_per_token_logps(self, model, input_ids, attention_mask, logits_to_keep):
         # We add 1 to `logits_to_keep` because the last logits of the sequence is later excluded
+        print(f"input_ids: {input_ids}")
+        print(f"attention_mask: {attention_mask}")
+        print(f"logits_to_keep: {logits_to_keep}")
         logits = model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=logits_to_keep + 1).logits
+        print(f"logits: {logits}")
         logits = logits[:, :-1, :]  # (B, L-1, V), exclude the last logit: it corresponds to the next token pred
+        print(f"logits: {logits}")
         input_ids = input_ids[:, -logits_to_keep:]
+        print(f"input_ids: {input_ids}")
         # For transformers<=4.48, logits_to_keep argument isn't supported, so here we drop logits ourselves.
         # See https://github.com/huggingface/trl/issues/2770
         logits = logits[:, -logits_to_keep:]
+        print(f"logits: {logits}")
         # Divide logits by sampling temperature.
         # See https://huggingface.co/blog/the_n_implementation_details_of_rlhf_with_ppo#policy-training-implementation-details
         logits = logits / self.temperature
+        print(f"logits: {logits}")
         return selective_log_softmax(logits, input_ids)  # compute logprobs for the input tokens
 
     @profiling_decorator
@@ -754,13 +762,20 @@ class GRPOTrainer(Trainer):
     ) -> dict[str, Union[torch.Tensor, Any]]:
         device = self.accelerator.device
         prompts = [x["prompt"] for x in inputs]
+        # print prompts
+        print(f"prompts: {prompts}")
         prompts_text = [maybe_apply_chat_template(example, self.processing_class)["prompt"] for example in inputs]
+        # print prompts_text
+        print(f"prompts_text: {prompts_text}")
         prompt_inputs = self.processing_class(
             text=prompts_text, return_tensors="pt", padding=True, padding_side="left", add_special_tokens=False
         )
+        # print prompt_inputs shape and type
+        print(f"prompt_inputs shape: {prompt_inputs['input_ids'].shape}")
+        print(f"prompt_inputs type: {type(prompt_inputs)}")
         prompt_inputs = super()._prepare_inputs(prompt_inputs)
         prompt_ids, prompt_mask = prompt_inputs["input_ids"], prompt_inputs["attention_mask"]
-
+        # print prompt_ids shape and type
         if self.max_prompt_length is not None:
             prompt_ids = prompt_ids[:, -self.max_prompt_length :]
             prompt_mask = prompt_mask[:, -self.max_prompt_length :]
@@ -791,21 +806,27 @@ class GRPOTrainer(Trainer):
                         max_tokens=self.max_completion_length,
                         guided_decoding_regex=self.guided_decoding_regex,
                     )
+                    print(f"completion_ids: {completion_ids}")
             else:
                 completion_ids = [None] * len(all_prompts_text)
             # Broadcast the completions from the main process to all processes, ensuring each process receives its
             # corresponding slice.
             completion_ids = broadcast_object_list(completion_ids, from_process=0)
+            print(f"completion_ids after broadcasting: {completion_ids}")
             process_slice = slice(
                 self.accelerator.process_index * len(prompts),
                 (self.accelerator.process_index + 1) * len(prompts),
             )
+            print(f"process_slice: {process_slice}")
             completion_ids = completion_ids[process_slice]
-
+            print(f"completion_ids after slicing: {completion_ids}")
             # Pad the completions, and concatenate them with the prompts
             completion_ids = [torch.tensor(ids, device=device) for ids in completion_ids]
+            print(f"completion_ids after conversion: {completion_ids}")
             completion_ids = pad(completion_ids, padding_value=self.processing_class.pad_token_id)
+            print(f"completion_ids after padding: {completion_ids}")
             prompt_completion_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+            print(f"prompt_completion_ids: {prompt_completion_ids}")
         else:
             # Regular generation path
             with unwrap_model_for_generation(
@@ -822,10 +843,14 @@ class GRPOTrainer(Trainer):
 
         # Mask everything after the first EOS token
         is_eos = completion_ids == self.processing_class.eos_token_id
+        print(f"is_eos: {is_eos}")
         eos_idx = torch.full((is_eos.size(0),), is_eos.size(1), dtype=torch.long, device=device)
+        print(f"eos_idx: {eos_idx}")
         eos_idx[is_eos.any(dim=1)] = is_eos.int().argmax(dim=1)[is_eos.any(dim=1)]
         sequence_indices = torch.arange(is_eos.size(1), device=device).expand(is_eos.size(0), -1)
+        print(f"sequence_indices: {sequence_indices}")
         completion_mask = (sequence_indices <= eos_idx.unsqueeze(1)).int()
+        print(f"completion_mask: {completion_mask}")
 
         # If mask_truncated_completions is enabled, zero out truncated completions in completion_mask
         if self.mask_truncated_completions:
@@ -834,9 +859,9 @@ class GRPOTrainer(Trainer):
 
         # Concatenate prompt_mask with completion_mask for logit computation
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)  # (B, P+C)
-
+        print(f"attention_mask: {attention_mask}")
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
-
+        print(f"logits_to_keep: {logits_to_keep}")
         with torch.no_grad():
             # When using num_iterations == 1, old_per_token_logps == per_token_logps, so we can skip it's
             # computation here, and use per_token_logps.detach() instead.
@@ -846,6 +871,7 @@ class GRPOTrainer(Trainer):
                 )
             else:
                 old_per_token_logps = None
+            print(f"old_per_token_logps: {old_per_token_logps}")
 
             if self.beta == 0.0:
                 ref_per_token_logps = None
@@ -858,9 +884,10 @@ class GRPOTrainer(Trainer):
                     ref_per_token_logps = self._get_per_token_logps(
                         self.model, prompt_completion_ids, attention_mask, logits_to_keep
                     )
-
+            print(f"ref_per_token_logps: {ref_per_token_logps}")
         # Decode the generated completions
         completions_text = self.processing_class.batch_decode(completion_ids, skip_special_tokens=True)
+        print(f"completions_text: {completions_text}")
         if is_conversational(inputs[0]):
             completions = []
             for prompt, completion in zip(prompts, completions_text):
@@ -868,7 +895,7 @@ class GRPOTrainer(Trainer):
                 completions.append([{"role": "assistant", "content": bootstrap + completion}])
         else:
             completions = completions_text
-
+        print(f"completions: {completions}")
         rewards_per_func = torch.zeros(len(prompts), len(self.reward_funcs), device=device)
         for i, (reward_func, reward_processing_class) in enumerate(
             zip(self.reward_funcs, self.reward_processing_classes)
@@ -897,9 +924,10 @@ class GRPOTrainer(Trainer):
                     keys = [key for key in inputs[0] if key not in ["prompt", "completion"]]
                     reward_kwargs = {key: [example[key] for example in inputs] for key in keys}
                     output_reward_func = reward_func(prompts=prompts, completions=completions, **reward_kwargs)
+                    print(f"output_reward_func: {output_reward_func}")
                     # Convert None values to NaN
                     output_reward_func = [reward if reward is not None else torch.nan for reward in output_reward_func]
-
+                    print(f"output_reward_func: {output_reward_func}")
                     rewards_per_func[:, i] = torch.tensor(output_reward_func, dtype=torch.float32, device=device)
 
         # If all reward functions return None for a given row, issue a detailed warning
@@ -916,20 +944,25 @@ class GRPOTrainer(Trainer):
         # Gather the reward per function: this part is crucial, because the rewards are normalized per group and the
         # completions may be distributed across processes
         rewards_per_func = gather(rewards_per_func)
-
+        print(f"rewards_per_func: {rewards_per_func}")
         # Apply weights to each reward function's output and sum
         rewards = (rewards_per_func * self.reward_weights.to(device).unsqueeze(0)).nansum(dim=1)
-
+        print(f"rewards: {rewards}")
         # Compute grouped-wise rewards
         mean_grouped_rewards = rewards.view(-1, self.num_generations).mean(dim=1)
         std_grouped_rewards = rewards.view(-1, self.num_generations).std(dim=1)
-
+        print(f"mean_grouped_rewards: {mean_grouped_rewards}")
+        print(f"std_grouped_rewards: {std_grouped_rewards}")
         # Normalize the rewards to compute the advantages
         mean_grouped_rewards = mean_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
         std_grouped_rewards = std_grouped_rewards.repeat_interleave(self.num_generations, dim=0)
+        print(f"mean_grouped_rewards: {mean_grouped_rewards}")
+        print(f"std_grouped_rewards: {std_grouped_rewards}")
         advantages = rewards - mean_grouped_rewards
+        print(f"advantages: {advantages}")
         if self.scale_rewards:
             advantages = advantages / (std_grouped_rewards + 1e-4)
+            print(f"advantages: {advantages}")
 
         # Slice to keep only the local part of the data
         process_slice = slice(
@@ -987,6 +1020,13 @@ class GRPOTrainer(Trainer):
         for i, name in enumerate(reward_func_names):
             self._textual_logs["rewards"][name].extend(rewards_per_func[:, i].tolist())
 
+        print(f"prompt_ids: {prompt_ids}")
+        print(f"prompt_mask: {prompt_mask}")
+        print(f"completion_ids: {completion_ids}")
+        print(f"completion_mask: {completion_mask}")
+        print(f"advantages: {advantages}")
+        print(f"old_per_token_logps: {old_per_token_logps}")
+        print(f"ref_per_token_logps: {ref_per_token_logps}")
         return {
             "prompt_ids": prompt_ids,
             "prompt_mask": prompt_mask,
@@ -1043,35 +1083,49 @@ class GRPOTrainer(Trainer):
     def _compute_loss(self, model, inputs):
         # Compute the per-token log probabilities for the model
         prompt_ids, prompt_mask = inputs["prompt_ids"], inputs["prompt_mask"]
+        print(f"prompt_ids: {prompt_ids}")
+        print(f"prompt_mask: {prompt_mask}")
         completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
+        print(f"completion_ids: {completion_ids}")
+        print(f"completion_mask: {completion_mask}")
         input_ids = torch.cat([prompt_ids, completion_ids], dim=1)
+        print(f"input_ids: {input_ids}")
         attention_mask = torch.cat([prompt_mask, completion_mask], dim=1)
+        print(f"attention_mask: {attention_mask}")
         logits_to_keep = completion_ids.size(1)  # we only need to compute the logits for the completion tokens
-
+        print(f"logits_to_keep: {logits_to_keep}")
         per_token_logps = self._get_per_token_logps(model, input_ids, attention_mask, logits_to_keep)
-
+        print(f"per_token_logps: {per_token_logps}")
         # Compute the KL divergence between the model and the reference model
         if self.beta != 0.0:
             ref_per_token_logps = inputs["ref_per_token_logps"]
             per_token_kl = (
                 torch.exp(ref_per_token_logps - per_token_logps) - (ref_per_token_logps - per_token_logps) - 1
             )
-
+            print(f"per_token_kl: {per_token_kl}")
         # Compute the loss
         advantages = inputs["advantages"]
+        print(f"advantages: {advantages}")
         # When using num_iterations == 1, old_per_token_logps == per_token_logps, so we can skip it's computation (see
         # _generate_and_score_completions) and use per_token_logps.detach() instead.
         old_per_token_logps = inputs["old_per_token_logps"] if self.num_iterations > 1 else per_token_logps.detach()
+        print(f"old_per_token_logps: {old_per_token_logps}")
         coef_1 = torch.exp(per_token_logps - old_per_token_logps)
+        print(f"coef_1: {coef_1}")
         coef_2 = torch.clamp(coef_1, 1 - self.epsilon_low, 1 + self.epsilon_high)
+        print(f"coef_2: {coef_2}")
         per_token_loss1 = coef_1 * advantages.unsqueeze(1)
+        print(f"per_token_loss1: {per_token_loss1}")
         per_token_loss2 = coef_2 * advantages.unsqueeze(1)
+        print(f"per_token_loss2: {per_token_loss2}")
         per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
+        print(f"per_token_loss: {per_token_loss}")
         if self.beta != 0.0:
             per_token_loss = per_token_loss + self.beta * per_token_kl
-
+            print(f"per_token_loss: {per_token_loss}")
         if self.loss_type == "grpo":
             loss = ((per_token_loss * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)).mean()
+            print(f"loss: {loss}")
         elif self.loss_type == "bnpo":
             loss = (per_token_loss * completion_mask).sum() / completion_mask.sum().clamp(min=1.0)
         elif self.loss_type == "dr_grpo":
@@ -1085,13 +1139,16 @@ class GRPOTrainer(Trainer):
         if self.beta != 0.0:
             mean_kl = (per_token_kl * completion_mask).sum() / completion_mask.sum()
             self._metrics[mode]["kl"].append(self.accelerator.gather_for_metrics(mean_kl).nanmean().item())
-
+        print(f"mean_kl: {mean_kl}")
         # Compute the clip ratio
         is_clipped = ((coef_1 < 1 - self.epsilon_low) & (advantages.unsqueeze(1) < 0)) | (
             (coef_1 > 1 + self.epsilon_high) & (advantages.unsqueeze(1) > 0)
         )
+        print(f"is_clipped: {is_clipped}")
         clip_ratio = (is_clipped * completion_mask).sum() / completion_mask.sum()
         self._metrics[mode]["clip_ratio"].append(self.accelerator.gather_for_metrics(clip_ratio).nanmean().item())
+        print(f"clip_ratio: {clip_ratio}")
+        print(f"loss: {loss}")
         return loss
 
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys: Optional[list[str]] = None):

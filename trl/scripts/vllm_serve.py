@@ -462,6 +462,7 @@ def main(script_args: ScriptArguments):
             min_p=request.min_p,
             max_tokens=request.max_tokens,
             guided_decoding=guided_decoding,
+            seed=42,
         )
         # Evenly distribute prompts across DP ranks
         chunked_prompts = chunk_list(request.prompts, script_args.data_parallel_size)

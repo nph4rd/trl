@@ -25,6 +25,14 @@ from typing import Optional
 
 import torch
 
+import multiprocessing as mp
+
+if mp.get_start_method(allow_none=True) != "spawn":
+    mp.set_start_method("spawn", force=True)
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+
 from trl import TrlParser
 from trl.import_utils import (
     is_fastapi_available,
